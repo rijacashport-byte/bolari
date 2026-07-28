@@ -779,9 +779,14 @@ document.getElementById('export-excel-btn').addEventListener('click', () => {
   XLSX.utils.book_append_sheet(wb, wsCategory, 'Par catégorie');
 
   const journalHeader = ['Date', 'Description', 'Catégorie', 'Type', 'Personne', 'Montant (Ar)'];
+  const journalHeaderReal = ['Date', 'Description', 'Catégorie', 'Type', 'Personne', 'Crédit (Ar)', 'Débit (Ar)'];
   const wsJournal = XLSX.utils.aoa_to_sheet([
-    journalHeader,
-    ...d.realisedRows.map(r => [r.date, r.description, r.category, r.type, r.payer, r.amount])
+    journalHeaderReal,
+    ...d.realisedRows.map(r => [
+      r.date, r.description, r.category, r.type, r.payer,
+      r.type === 'Crédit' ? r.amount : '',
+      r.type === 'Débit' ? -r.amount : ''
+    ])
   ]);
   XLSX.utils.book_append_sheet(wb, wsJournal, 'Journal réalisé');
 
