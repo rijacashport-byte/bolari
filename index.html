@@ -287,6 +287,42 @@
     tbody td:last-child::before{ content:none; }
   }
 
+  .export-buttons{
+    display:flex;
+    gap:12px;
+    flex-wrap:wrap;
+  }
+  .btn-export{
+    flex:1;
+    min-width:160px;
+    background:var(--paper);
+    border:1.5px solid var(--navy);
+    color:var(--navy);
+    padding:12px;
+    border-radius:8px;
+    font-size:14px;
+  }
+  .btn-export:hover{ background:var(--navy); color:#fff; }
+
+  #print-report{ display:none; }
+  body.printing > *:not(#print-report){ display:none !important; }
+  body.printing #print-report{
+    display:block;
+    background:#fff;
+    color:#000;
+    padding:20px;
+  }
+  #print-report h1{ font-family:'Lora', Georgia, serif; color:#1C2A44; margin:0 0 2px; }
+  #print-report .pr-sub{ color:#666; font-size:13px; margin:0 0 20px; }
+  #print-report img.pr-logo{ width:70px; height:70px; border-radius:50%; display:block; margin-bottom:10px; }
+  #print-report h2{ font-family:'Lora', Georgia, serif; font-size:16px; color:#1C2A44; border-bottom:1px solid #ddd; padding-bottom:4px; margin:22px 0 10px; }
+  #print-report table{ width:100%; border-collapse:collapse; font-size:12.5px; margin-bottom:8px; }
+  #print-report th, #print-report td{ border:1px solid #ccc; padding:5px 7px; text-align:left; }
+  #print-report th{ background:#F2EFE9; }
+  #print-report .pr-totals{ display:flex; gap:24px; flex-wrap:wrap; margin-bottom:6px; }
+  #print-report .pr-totals div{ font-size:13px; }
+  #print-report .pr-totals b{ display:block; font-size:16px; color:#1C2A44; }
+
   #login-screen{
     min-height:100vh;
     display:flex;
@@ -343,6 +379,7 @@
 <meta name="apple-mobile-web-app-capable" content="yes">
 <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
 <meta name="apple-mobile-web-app-title" content="BOLARI">
+<script src="https://cdnjs.cloudflare.com/ajax/libs/xlsx/0.18.5/xlsx.full.min.js"></script>
 <script src="https://www.gstatic.com/firebasejs/10.13.0/firebase-app-compat.js"></script>
 <script src="https://www.gstatic.com/firebasejs/10.13.0/firebase-auth-compat.js"></script>
 <script src="https://www.gstatic.com/firebasejs/10.13.0/firebase-firestore-compat.js"></script>
@@ -469,7 +506,18 @@
     <div class="empty" id="empty-msg" style="display:none;">Aucune opération enregistrée pour l'instant.</div>
   </section>
 
+  <section>
+    <h2>Exporter le bilan</h2>
+    <div class="export-buttons">
+      <button type="button" class="btn-export" id="export-excel-btn">📊 Exporter en Excel</button>
+      <button type="button" class="btn-export" id="export-pdf-btn">📄 Exporter en PDF</button>
+    </div>
+    <p class="note">Le bilan inclut les opérations réalisées, avec une section séparée pour les prévisionnelles.</p>
+  </section>
+
 </div>
+
+<div id="print-report"></div>
 
 <script>
 const firebaseConfig = {
@@ -658,6 +706,148 @@ document.getElementById('expense-form').addEventListener('submit', async (e) => 
   e.target.reset();
   document.getElementById('f-date').value = '';
   renderAll();
+});
+
+// --- Calculs partagés pour les exports ---
+function computeExportData(){
+  const realised = expenses.filter(e => e.status === 'engage');
+  const planned = expenses.filter(e => e.status === 'prevu');
+
+  const totalCreditReal = realised.filter(e=>e.type==='credit').reduce((s,e)=>s+Number(e.amount),0);
+  const totalDebitReal = realised.filter(e=>e.type==='debit').reduce((s,e)=>s+Number(e.amount),0);
+  const totalDebitPlanned = planned.filter(e=>e.type==='debit').reduce((s,e)=>s+Number(e.amount),0);
+  const totalCreditPlanned = planned.filter(e=>e.type==='credit').reduce((s,e)=>s+Number(e.amount),0);
+  const balance = totalCreditReal - totalDebitReal;
+
+  const perPerson = contributors.map(c => {
+    const cred = realised.filter(e=>e.type==='credit' && e.payer===c.id).reduce((s,e)=>s+Number(e.amount),0);
+    const deb = realised.filter(e=>e.type==='debit' && e.payer===c.id).reduce((s,e)=>s+Number(e.amount),0);
+    return { name: c.name, credited: cred, debited: deb, net: cred - deb };
+  });
+
+  const categories = {};
+  realised.filter(e=>e.type==='debit').forEach(e => {
+    categories[e.category] = (categories[e.category] || 0) + Number(e.amount);
+  });
+
+  const rowify = (list) => list.map(e => ({
+    date: e.date,
+    description: e.description || '—',
+    category: e.category,
+    type: e.type === 'credit' ? 'Crédit' : 'Débit',
+    payer: (contributors.find(c=>c.id===e.payer)||{}).name || '—',
+    amount: Number(e.amount)
+  })).sort((a,b)=> new Date(a.date) - new Date(b.date));
+
+  return {
+    balance, totalCreditReal, totalDebitReal, totalDebitPlanned, totalCreditPlanned,
+    perPerson, categories,
+    realisedRows: rowify(realised),
+    plannedRows: rowify(planned)
+  };
+}
+
+// --- Export Excel (SheetJS) ---
+document.getElementById('export-excel-btn').addEventListener('click', () => {
+  const d = computeExportData();
+  const wb = XLSX.utils.book_new();
+
+  const wsResume = XLSX.utils.aoa_to_sheet([
+    ['Bilan BOLARI - Fitsaboina Mama', ''],
+    ['Généré le', new Date().toLocaleDateString('fr-FR')],
+    [],
+    ['Solde de la caisse (réalisé)', d.balance],
+    ['Total crédité (réalisé)', d.totalCreditReal],
+    ['Total dépensé (réalisé)', d.totalDebitReal],
+    [],
+    ['Prévisionnel'],
+    ['Total dépenses prévues', d.totalDebitPlanned],
+    ['Total dépôts prévus', d.totalCreditPlanned]
+  ]);
+  XLSX.utils.book_append_sheet(wb, wsResume, 'Résumé');
+
+  const wsPerson = XLSX.utils.aoa_to_sheet([
+    ['Personne', 'Crédité (Ar)', 'Débité (Ar)', 'Net (Ar)'],
+    ...d.perPerson.map(p => [p.name, p.credited, p.debited, p.net])
+  ]);
+  XLSX.utils.book_append_sheet(wb, wsPerson, 'Par personne');
+
+  const wsCategory = XLSX.utils.aoa_to_sheet([
+    ['Catégorie', 'Total dépensé (Ar) — réalisé'],
+    ...Object.entries(d.categories).map(([cat, val]) => [cat, val])
+  ]);
+  XLSX.utils.book_append_sheet(wb, wsCategory, 'Par catégorie');
+
+  const journalHeader = ['Date', 'Description', 'Catégorie', 'Type', 'Personne', 'Montant (Ar)'];
+  const wsJournal = XLSX.utils.aoa_to_sheet([
+    journalHeader,
+    ...d.realisedRows.map(r => [r.date, r.description, r.category, r.type, r.payer, r.amount])
+  ]);
+  XLSX.utils.book_append_sheet(wb, wsJournal, 'Journal réalisé');
+
+  const wsPlanned = XLSX.utils.aoa_to_sheet([
+    journalHeader,
+    ...d.plannedRows.map(r => [r.date, r.description, r.category, r.type, r.payer, r.amount])
+  ]);
+  XLSX.utils.book_append_sheet(wb, wsPlanned, 'Prévisionnel');
+
+  XLSX.writeFile(wb, 'bolari_bilan_' + new Date().toISOString().slice(0,10) + '.xlsx');
+});
+
+// --- Export PDF (impression navigateur) ---
+function buildPrintReport(){
+  const d = computeExportData();
+  const logoSrc = document.querySelector('header .logo').src;
+  const fmtAr = (n) => Math.round(n).toLocaleString('fr-FR') + ' Ar';
+
+  const rowsHtml = (rows) => rows.length
+    ? rows.map(r => `<tr><td>${new Date(r.date).toLocaleDateString('fr-FR')}</td><td>${r.description}</td><td>${r.category}</td><td>${r.type}</td><td>${r.payer}</td><td>${fmtAr(r.amount)}</td></tr>`).join('')
+    : '<tr><td colspan="6" style="text-align:center;color:#888;">Aucune opération</td></tr>';
+
+  const perPersonHtml = d.perPerson.map(p => `<tr><td>${p.name}</td><td>${fmtAr(p.credited)}</td><td>${fmtAr(p.debited)}</td><td>${fmtAr(p.net)}</td></tr>`).join('');
+  const categoryHtml = Object.entries(d.categories).map(([cat,val]) => `<tr><td>${cat}</td><td>${fmtAr(val)}</td></tr>`).join('') || '<tr><td colspan="2" style="text-align:center;color:#888;">Aucune dépense</td></tr>';
+
+  document.getElementById('print-report').innerHTML = `
+    <img class="pr-logo" src="${logoSrc}">
+    <h1>BOLARI — Bilan des soins de Maman</h1>
+    <p class="pr-sub">Généré le ${new Date().toLocaleDateString('fr-FR')}</p>
+
+    <h2>Résumé (réalisé)</h2>
+    <div class="pr-totals">
+      <div>Solde de la caisse<b>${fmtAr(d.balance)}</b></div>
+      <div>Total crédité<b>${fmtAr(d.totalCreditReal)}</b></div>
+      <div>Total dépensé<b>${fmtAr(d.totalDebitReal)}</b></div>
+    </div>
+
+    <h2>Par personne</h2>
+    <table><thead><tr><th>Personne</th><th>Crédité</th><th>Débité</th><th>Net</th></tr></thead>
+    <tbody>${perPersonHtml}</tbody></table>
+
+    <h2>Par catégorie (dépenses réalisées)</h2>
+    <table><thead><tr><th>Catégorie</th><th>Total</th></tr></thead>
+    <tbody>${categoryHtml}</tbody></table>
+
+    <h2>Journal des opérations réalisées</h2>
+    <table><thead><tr><th>Date</th><th>Description</th><th>Catégorie</th><th>Type</th><th>Personne</th><th>Montant</th></tr></thead>
+    <tbody>${rowsHtml(d.realisedRows)}</tbody></table>
+
+    <h2>Opérations prévisionnelles</h2>
+    <div class="pr-totals">
+      <div>Dépenses prévues<b>${fmtAr(d.totalDebitPlanned)}</b></div>
+      <div>Dépôts prévus<b>${fmtAr(d.totalCreditPlanned)}</b></div>
+    </div>
+    <table><thead><tr><th>Date</th><th>Description</th><th>Catégorie</th><th>Type</th><th>Personne</th><th>Montant</th></tr></thead>
+    <tbody>${rowsHtml(d.plannedRows)}</tbody></table>
+  `;
+}
+
+document.getElementById('export-pdf-btn').addEventListener('click', () => {
+  buildPrintReport();
+  document.body.classList.add('printing');
+  window.print();
+});
+window.addEventListener('afterprint', () => {
+  document.body.classList.remove('printing');
 });
 
 if ('serviceWorker' in navigator) {
